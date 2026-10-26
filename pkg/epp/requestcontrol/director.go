@@ -302,6 +302,14 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	// Run admit request plugins
 	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+		// Preserve a typed errcommon.Error from the denying Admitter so the
+		// status code it chose (e.g. ResourceExhausted for a shed) and its
+		// headers (the x-llm-d-request-dropped-reason) reach Envoy intact.
+		// An untyped denial keeps collapsing to Internal, as before.
+		var e errcommon.Error
+		if errors.As(denyReason, &e) {
+			return reqCtx, e
+		}
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
 	}
 
@@ -560,7 +568,7 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
 	result := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
-		result[i] = fwksched.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
+		result[i] = fwksched.NewEndpointFromSnapshot(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
 	}
 
 	return result

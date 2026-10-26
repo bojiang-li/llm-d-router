@@ -56,6 +56,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fccontractmocks "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -967,6 +968,68 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantErrCode:             errcommon.Internal,
 		},
 		{
+			name: "typed denial by admit request plugin surfaces as its status code and drop reason",
+			reqBodyMap: map[string]any{
+				"model": model,
+				"messages": []any{
+					map[string]any{
+						"role":    "user",
+						"content": "critical prompt",
+					},
+				},
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			wantMutatedBody: map[string]any{
+				"model": model,
+				"messages": []any{
+					map[string]any{
+						"role":    "user",
+						"content": "critical prompt",
+					},
+				},
+			},
+			targetModelName: model,
+			admitRequestDenialError: errcommon.Error{
+				Code:    errcommon.ResourceExhausted,
+				Msg:     "shed: pool near saturation",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+			},
+			wantErrCode:       errcommon.ResourceExhausted,
+			wantDroppedReason: string(errcommon.RequestDroppedReasonSaturated),
+		},
+		{
+			name: "wrapped typed denial by admit request plugin keeps its status code",
+			reqBodyMap: map[string]any{
+				"model": model,
+				"messages": []any{
+					map[string]any{
+						"role":    "user",
+						"content": "critical prompt",
+					},
+				},
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			wantMutatedBody: map[string]any{
+				"model": model,
+				"messages": []any{
+					map[string]any{
+						"role":    "user",
+						"content": "critical prompt",
+					},
+				},
+			},
+			targetModelName: model,
+			admitRequestDenialError: fmt.Errorf("admitter wrapped: %w",
+				errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "shed"}),
+			wantErrCode: errcommon.ServiceUnavailable,
+		},
+		{
 			name: "successful chat completions request with multiple messages",
 			reqBodyMap: map[string]any{
 				"model": model,
@@ -1267,10 +1330,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					config = config.WithPropagatePriority(true)
 				}
 
-				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+				endpointCandidates := NewDatastoreEndpointCandidates(ds)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
 				if test.emptyEndpoints {
-					director.endpointCandidates = &mockEndpointCandidates{}
+					director.endpointCandidates = &fccontractmocks.MockEndpointCandidates{}
 				}
 				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
@@ -1278,7 +1341,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 						rewrites: test.rewrites,
 					}
 					director.datastore = mockDs
-					director.endpointCandidates = NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(mockDs), time.Minute)
+					director.endpointCandidates = NewDatastoreEndpointCandidates(mockDs)
 				}
 
 				reqCtx := &handlers.RequestContext{
@@ -1637,7 +1700,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			mockDs := &mockDatastore{rewrites: test.rewrites}
-			endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(mockDs), time.Minute)
+			endpointCandidates := NewDatastoreEndpointCandidates(mockDs)
 			director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig())
 
 			reqCtx := &handlers.RequestContext{
@@ -1752,7 +1815,7 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	ds := datastore.NewDatastore(t.Context(), nil)
 	mockSched := &mockScheduler{}
-	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+	endpointCandidates := NewDatastoreEndpointCandidates(ds)
 	director := NewDirectorWithConfig(
 		ds,
 		mockSched,
@@ -1826,7 +1889,7 @@ func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := logutil.NewTestLoggerIntoContext(context.Background())
 			ds := datastore.NewDatastore(t.Context(), nil)
-			endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+			endpointCandidates := NewDatastoreEndpointCandidates(ds)
 			director := NewDirectorWithConfig(
 				ds,
 				&mockScheduler{},
@@ -1857,7 +1920,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	ds := datastore.NewDatastore(t.Context(), nil)
 	mockSched := &mockScheduler{}
-	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+	endpointCandidates := NewDatastoreEndpointCandidates(ds)
 	director := NewDirectorWithConfig(ds, mockSched, nil, endpointCandidates, NewConfig().WithResponseStreamingPlugins(ps1))
 
 	reqCtx := &handlers.RequestContext{
@@ -2231,7 +2294,7 @@ func newSinglePodDirector(t *testing.T, scheduleResult *fwksched.SchedulingResul
 	})
 
 	cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
-	candidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+	candidates := NewDatastoreEndpointCandidates(ds)
 	dir := NewDirectorWithConfig(ds, &mockScheduler{scheduleResults: scheduleResult}, &mockAdmissionController{}, candidates, cfg)
 	return dir, ctx
 }
